@@ -1,0 +1,145 @@
+{
+  "info": {
+    "name": "Self-Healing RAG API",
+    "description": "Test collection for the Self-Healing RAG pipeline API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/health",
+        "description": "Verify the API is running"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Status is ok', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.status).to.eql('ok');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Query — In-Docs Question",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/query",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"What are the main application domains of Generative AI?\"\n}"
+        },
+        "description": "Question that exists in the knowledge base — expect attempts=1, grade=pass"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Response has required fields', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('answer');",
+              "  pm.expect(body).to.have.property('sources');",
+              "  pm.expect(body).to.have.property('attempts');",
+              "});",
+              "pm.test('Answer is non-empty', () => {",
+              "  pm.expect(pm.response.json().answer.length).to.be.above(0);",
+              "});",
+              "pm.test('Attempts is at least 1', () => {",
+              "  pm.expect(pm.response.json().attempts).to.be.at.least(1);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Query — Out-of-Docs Question",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/query",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"Why do penguins waddle?\"\n}"
+        },
+        "description": "Question NOT in the knowledge base — expect attempts=3, give_up message"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Attempts is 3 (all retries exhausted)', () => {",
+              "  pm.expect(pm.response.json().attempts).to.eql(3);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Query — Empty Question (should fail 422)",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/query",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"\"\n}"
+        },
+        "description": "Empty question — Pydantic validation should return HTTP 422"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 422 (validation error)', () => pm.response.to.have.status(422));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Query — Missing Field (should fail 422)",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/query",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "description": "Missing question field — Pydantic validation should return HTTP 422"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 422 (validation error)', () => pm.response.to.have.status(422));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
