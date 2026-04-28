@@ -98,7 +98,8 @@ def generate_node(state: RAGState) -> dict:
     context = "\n\n".join(state["documents"]) if state["documents"] else "No context available."
 
     prompt = f"""You are a helpful assistant. Answer the question using ONLY the context below.
-If the context does not contain enough information, say you cannot answer from the available documents.
+Even if the context only partially covers the question, provide the best answer you can from what is available.
+Only say you cannot answer if the context has absolutely no relevant information at all.
 
 Context:
 {context}
@@ -137,13 +138,17 @@ Answer to evaluate:
 {state['answer']}
 
 Grading rules:
-1. If the answer makes specific claims that are supported by the context → grade: pass
+1. If the answer makes specific claims fully supported by the context → grade: pass
 2. If the answer says "I cannot answer", "I don't know", or "not enough information" → grade: fail
    (These responses mean retrieval failed and we should retry with a better query)
 3. If the answer contains claims NOT found in the context → grade: fail
+4. If the answer is grounded in the context but the context only partially covers the question
+   (the answer is correct but incomplete due to limited source material) → grade: partial
 
 Respond with ONLY valid JSON in this exact format:
 {{"grade": "pass", "reason": "brief explanation"}}
+or
+{{"grade": "partial", "reason": "brief explanation of what is missing"}}
 or
 {{"grade": "fail", "reason": "brief explanation"}}
 
@@ -213,9 +218,25 @@ Return ONLY the rewritten question, nothing else."""
 # ─────────────────────────────────────────────
 
 def give_up_node(state: RAGState) -> dict:
-    
     logger.info(f"[give_up] all retries exhausted after {state['retry_count']} attempt(s)")
     return {"answer": GIVE_UP_MESSAGE}
+
+
+def partial_node(state: RAGState) -> dict:
+    """
+    Answer is grounded but the docs only partially cover the question.
+    Returns the answer with an honest caveat — no retry needed.
+
+    WHY not retry?
+    Retrying won't help — the knowledge base simply doesn't have more info.
+    Better to return what we have and be transparent about the limitation.
+    """
+    logger.info(f"[partial] grounded but incomplete: {state['grade_reason']}")
+    caveat = (
+        f"\n\n---\n*Note: This answer is based on available documents but may be incomplete. "
+        f"{state['grade_reason']}*"
+    )
+    return {"answer": state["answer"] + caveat}
 
 
 # ─────────────────────────────────────────────
@@ -223,10 +244,19 @@ def give_up_node(state: RAGState) -> dict:
 # ─────────────────────────────────────────────
 
 def should_retry(state: RAGState) -> str:
-    
+    """
+    Decides what happens after grading.
+
+    - pass    → grounded and complete → return answer
+    - partial → grounded but incomplete → append caveat, return answer
+    - fail    → not grounded → rewrite and retry
+    """
     if state["grade"] == "pass":
         logger.info("[router] grade=pass → returning answer")
         return "end"
+    elif state["grade"] == "partial":
+        logger.info(f"[router] grade=partial → returning with caveat")
+        return "partial"
     elif state["retry_count"] >= 2:
         logger.info("[router] grade=fail, retries exhausted → give_up")
         return "give_up"
@@ -252,6 +282,7 @@ def create_rag_agent(persist_dir: str = None):
     graph.add_node("grade", grade_node)
     graph.add_node("rewrite", rewrite_node)
     graph.add_node("give_up", give_up_node)
+    graph.add_node("partial", partial_node)
 
     # Add fixed edges (always go from A to B)
     graph.add_edge(START, "retrieve")
@@ -265,13 +296,14 @@ def create_rag_agent(persist_dir: str = None):
         should_retry,
         {
             "end": END,
+            "partial": "partial",
             "rewrite": "rewrite",
             "give_up": "give_up",
         },
     )
 
-    # After rewrite, go back to retrieve (the retry loop)
     graph.add_edge("rewrite", "retrieve")
+    graph.add_edge("partial", END)
     graph.add_edge("give_up", END)
 
     return graph.compile()
