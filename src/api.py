@@ -24,11 +24,12 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.rag_agent import create_rag_agent, query_rag
+from src.guardrails import sanitize_question
 
 load_dotenv()
 
@@ -172,9 +173,14 @@ async def query(request: QueryRequest, req: Request):
     """
     logger.info(f"[POST /query] question='{request.question}'")
 
+    # Layer 1: guardrail check before anything hits the LLM
+    is_safe, result_or_reason = sanitize_question(request.question)
+    if not is_safe:
+        raise HTTPException(status_code=400, detail=result_or_reason)
+
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
-        None, query_rag, req.app.state.agent, request.question
+        None, query_rag, req.app.state.agent, result_or_reason
     )
 
     logger.info(f"[POST /query] attempts={result['attempts']} answer_len={len(result['answer'])}")

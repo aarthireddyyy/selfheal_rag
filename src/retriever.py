@@ -69,46 +69,23 @@ def hybrid_retrieve(
     store: Chroma,
     k: int = 4,
     fetch_k: int = 10,
+    min_reranker_score: float = -5.0,
 ) -> list[str]:
     """
     Retrieves the top-k most relevant chunks using hybrid search + reranking.
 
     Args:
-        query:   the user's question (possibly rewritten)
-        store:   the ChromaDB vector store
-        k:       number of chunks to return to the LLM (default 4)
-        fetch_k: how many candidates each method fetches before reranking (default 10)
+        query:              the user's question
+        store:              ChromaDB vector store
+        k:                  chunks to return to the LLM
+        fetch_k:            candidates each method fetches before reranking
+        min_reranker_score: if the best chunk scores below this, return empty
+                            (signals the query has nothing to do with the KB)
 
-    Returns:
-        list of chunk text strings, ranked best-first
-
-    HOW IT WORKS:
-
-    Step 1 — Vector search
-    ChromaDB embeds the query and finds the fetch_k most similar chunks
-    by cosine similarity. Good at semantic meaning.
-
-    Step 2 — BM25 search
-    We load ALL chunks from ChromaDB into memory, build a BM25 index,
-    and score every chunk against the query keywords.
-    Good at exact term matching.
-
-    WHY load all chunks for BM25?
-    BM25 needs to see the full corpus to compute IDF (inverse document
-    frequency — how rare a word is across all documents). You can't do
-    BM25 on a subset. For 157 chunks this is fast (~1ms).
-
-    Step 3 — Merge
-    Combine vector results + BM25 results, deduplicate by text content.
-    We now have up to 2*fetch_k unique candidates.
-
-    Step 4 — Rerank
-    The cross-encoder reads (query, chunk) pairs and outputs a relevance
-    score for each. Unlike vector search which embeds query and chunk
-    separately, the cross-encoder reads them TOGETHER — much more accurate.
-
-    Step 5 — Return top-k
-    Sort by reranker score descending, return the top k chunk texts.
+    Returns empty list if no chunk is relevant enough — the agent will
+    then generate "I cannot answer" which the grader fails → give_up.
+    A score of -5.0 is a conservative threshold — clearly irrelevant queries
+    (like injection attempts or off-topic questions) score below -8.
     """
 
     # ── Step 1: Vector search ─────────────────────────────────────
@@ -160,11 +137,22 @@ def hybrid_retrieve(
 
     # ── Step 5: Return top-k ──────────────────────────────────────
     ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+    top_score = ranked[0][0]
+
+    # Relevance gate — if even the best chunk scores below threshold,
+    # the query has nothing to do with the knowledge base
+    if top_score < min_reranker_score:
+        logger.warning(
+            f"[hybrid_retrieve] top reranker score {top_score:.3f} below threshold "
+            f"{min_reranker_score} — returning empty (query not relevant to KB)"
+        )
+        return []
+
     top_chunks = [text for _, text in ranked[:k]]
 
     logger.info(
         f"[hybrid_retrieve] reranked {len(candidates)} → returning top {len(top_chunks)} chunks"
-        f" (top score: {ranked[0][0]:.3f})"
+        f" (top score: {top_score:.3f})"
     )
 
     return top_chunks
