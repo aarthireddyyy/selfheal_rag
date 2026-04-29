@@ -11,6 +11,8 @@ from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langgraph.graph import END, START, StateGraph
 
+from src.retriever import hybrid_retrieve
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -65,7 +67,21 @@ class RAGState(TypedDict):
 # ─────────────────────────────────────────────
 
 def retrieve_node(state: RAGState) -> dict:
-    
+    """
+    Retrieves relevant chunks using hybrid search (BM25 + vector) + reranking.
+
+    WHY hybrid over pure vector?
+    Vector search misses exact keyword matches (e.g. "BM25", "GPT-4", model names).
+    BM25 misses semantic matches (e.g. "automobile" vs "car").
+    Hybrid catches both — wider net, better first-pass quality.
+
+    WHY reranking after hybrid?
+    The merged candidate set has up to 20 chunks. The reranker (cross-encoder)
+    reads query + chunk TOGETHER and scores them more accurately than
+    cosine similarity alone. We pass only the top-4 to the LLM.
+
+    Result: fewer retries because the LLM gets better chunks on the first try.
+    """
     logger.info(f"[retrieve] query='{state['query']}' retry={state['retry_count']}")
 
     persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
@@ -77,13 +93,9 @@ def retrieve_node(state: RAGState) -> dict:
         persist_directory=persist_dir,
     )
 
-    # similarity_search returns Document objects sorted by relevance
-    results = store.similarity_search(state["query"], k=4)
+    documents = hybrid_retrieve(query=state["query"], store=store, k=4, fetch_k=10)
 
-    # Extract just the text content — state stores strings, not Document objects
-    documents = [doc.page_content for doc in results]
-
-    logger.info(f"[retrieve] found {len(documents)} chunk(s)")
+    logger.info(f"[retrieve] returning {len(documents)} chunk(s) after hybrid+rerank")
     return {"documents": documents}
 
 

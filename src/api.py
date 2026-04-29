@@ -18,6 +18,7 @@ store it in app.state.agent, and reuse it for every request.
 Without this, every request would wait 10 seconds. With it: milliseconds.
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -51,7 +52,7 @@ class QueryRequest(BaseModel):
 
     min_length=1 means empty strings are rejected. (Req 8.3)
     """
-    question: str = Field(..., min_length=1, description="The question to ask the knowledge base")
+    question: str = Field(..., min_length=1, max_length=1000, description="The question to ask the knowledge base")
 
 
 class QueryResponse(BaseModel):
@@ -171,7 +172,10 @@ async def query(request: QueryRequest, req: Request):
     """
     logger.info(f"[POST /query] question='{request.question}'")
 
-    result = query_rag(req.app.state.agent, request.question)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, query_rag, req.app.state.agent, request.question
+    )
 
     logger.info(f"[POST /query] attempts={result['attempts']} answer_len={len(result['answer'])}")
 
