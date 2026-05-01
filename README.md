@@ -1,181 +1,151 @@
 # Self-Healing RAG Pipeline
 
-A production-ready Retrieval-Augmented Generation (RAG) system that automatically grades its own answers and retries with rephrased queries when grading fails — preventing hallucinations by returning an honest "I don't know" instead of making things up.
+A production-grade Retrieval-Augmented Generation system that automatically detects and recovers from hallucinations before returning answers to users.
 
-## What Problem Does This Solve?
+## The Problem
 
-Basic RAG systems retrieve documents and generate answers but have no quality control. They hallucinate confidently, giving wrong answers with no fallback.
-
-This system is smarter. After generating an answer, it:
-1. Grades whether the answer is grounded in the retrieved documents
-2. If grading fails → rewrites the question and retries (max 2 retries)
-3. If all retries fail → returns "I don't know" instead of hallucinating
-
-Real-world use case: companies building knowledge base chatbots over internal documents (HR policies, product manuals, legal contracts) where hallucination destroys user trust.
-
----
+Standard RAG systems retrieve documents, generate an answer, and returgn it — with no quality control. They hallucinate confidently. This system grades every answer for groundedness and retries with a rephrased query when grading fails, returning an honest "I don't know" instead of fabricated information.
 
 ## Architecture
 
 ```
 User Question
      ↓
-[Retrieve] → top-4 chunks from ChromaDB
+[Guardrails] — blocks prompt injection, sanitizes input
      ↓
-[Generate] → Groq Llama 3.3 answers using only those chunks
+[Hybrid Retrieve] — BM25 + Vector Search → Reranker → top-4 chunks
      ↓
-[Grade] → Groq judges: is this answer supported by the chunks?
+[Generate] — Groq Llama 3.3, answers using ONLY retrieved chunks
      ↓
-  PASS → return answer
-  FAIL → [Rewrite] → new query → back to Retrieve (max 2x)
-  STILL FAILING → "I don't know"
+[Grade] — LLM-as-judge: pass / partial / fail
+     ↓
+  pass    → return answer
+  partial → return answer + transparency caveat
+  fail    → rewrite query → retry (max 2x)
+  fail×3  → "I don't know"
 ```
 
-The retry loop is orchestrated by LangGraph as an explicit state machine.
+## What Makes This Different from Basic RAG
 
----
+| Feature | Basic RAG | This System |
+|---------|-----------|-------------|
+| Retrieval | Vector search only | BM25 + Vector + Reranker |
+| Quality control | None | LLM-as-judge grading |
+| Hallucination handling | Returns bad answer | Retries with rephrased query |
+| Partial answers | Silent | Flagged with caveat |
+| Prompt injection | Vulnerable | Pattern matching + hardened prompts |
+| Off-topic queries | Hallucinated answer | Reranker score gate → fast rejection |
 
 ## Tech Stack
 
-| Component | Technology | Why |
-|-----------|-----------|-----|
-| Language | Python 3.12+ | Modern async support, type hints |
-| Package Manager | uv | 10-100x faster than pip |
-| Vector Database | ChromaDB | Local, no server needed, persists to disk |
-| Embeddings | sentence-transformers | Free, runs locally, no API calls |
-| LLM | Groq Llama 3.3 70B | Free tier, very fast inference |
-| RAG Framework | LangChain + LangGraph | State machine for self-healing loop |
-| API Framework | FastAPI | Auto-validation, auto-docs, async-ready |
-| Chunking | SemanticChunker | Splits by meaning, not fixed size |
-
----
+- **LangGraph** — state machine orchestrating the self-healing retry loop
+- **ChromaDB** — local vector database, persists to disk
+- **sentence-transformers** — local embeddings, zero API cost
+- **SemanticChunker** — splits documents by meaning boundaries, not fixed character counts
+- **BM25 (rank-bm25)** — keyword search for hybrid retrieval
+- **cross-encoder/ms-marco-MiniLM-L-6-v2** — reranker for chunk quality scoring
+- **Groq Llama 3.3 70B** — generation + grading (free tier)
+- **FastAPI** — async REST API with Pydantic validation
+- **uv** — dependency management
 
 ## Project Structure
 
 ```
-self-healing-rag/
 ├── src/
-│   ├── ingest.py          # Document ingestion pipeline
-│   ├── rag_agent.py       # LangGraph self-healing agent
-│   └── api.py             # FastAPI REST API layer
-├── docs/                  # Your knowledge base (.txt, .pdf files)
-├── chroma_db/             # Vector store (auto-created)
-├── postman/               # Postman collection for API testing
-├── .env                   # Environment variables (GROQ_API_KEY)
-├── pyproject.toml         # Dependencies
-├── Dockerfile             # Docker image definition
-└── docker-compose.yml     # Docker orchestration
+│   ├── ingest.py       # Document ingestion: load → semantic chunk → embed → store
+│   ├── retriever.py    # Hybrid retrieval: BM25 + vector + reranker
+│   ├── rag_agent.py    # LangGraph state machine: retrieve → generate → grade → retry
+│   ├── guardrails.py   # Input sanitization + prompt injection defense
+│   └── api.py          # FastAPI: POST /query, GET /health
+├── docs/               # Knowledge base (.txt, .pdf)
+├── chroma_db/          # Vector store (auto-created)
+├── postman/            # API test collection
+├── Dockerfile
+└── docker-compose.yml
 ```
-
----
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) package manager
-- A free [Groq API key](https://console.groq.com)
-
-### Installation
-
-1. Clone the repo and navigate to the project directory
-
-2. Install dependencies:
 ```bash
+# Install dependencies
 uv sync
-```
 
-3. Create a `.env` file:
-```bash
-GROQ_API_KEY=your_groq_api_key_here
-CHROMA_PERSIST_DIR=./chroma_db
-```
+# Configure environment
+echo "GROQ_API_KEY=your_key_here" > .env
+echo "CHROMA_PERSIST_DIR=./chroma_db" >> .env
 
-4. Add your documents to the `docs/` folder (supports `.txt` and `.pdf`)
-
-5. Run ingestion to load documents into ChromaDB:
-```bash
+# Add documents to docs/ (.txt or .pdf), then ingest
 uv run python src/ingest.py
+
+# Start API
+uv run uvicorn src.api:app --reload --port 8000
 ```
 
----
+Get a free Groq API key at [console.groq.com](https://console.groq.com).
 
-## Usage
-
-### Option 1: Interactive CLI
-
-```bash
-uv run python src/rag_agent.py
-```
-
-Ask questions interactively. Type `quit` to exit.
-
-### Option 2: REST API
-
-Start the server:
-```bash
-uv run uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
-```
-
-Then:
-- Open `http://localhost:8000/docs` for interactive Swagger UI
-- Or use curl:
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What are the main application domains of Generative AI?"}'
-```
-
-## API Endpoints
+## API
 
 ### `POST /query`
-
-Ask a question against the knowledge base.
-
-**Request:**
 ```json
-{
-  "question": "What is Generative AI?"
-}
-```
+// Request
+{ "question": "What are the main application domains of Generative AI?" }
 
-**Response:**
-```json
+// Response
 {
-  "answer": "Generative AI refers to artificial intelligence that can generate novel content...",
+  "answer": "The main application domains include text, images, video...",
   "sources": ["docs/survey.pdf", "docs/survey.pdf"],
   "attempts": 1
 }
 ```
-
-- `attempts=1` → answer passed grading on first try
-- `attempts=3` → exhausted all retries, returned "I don't know"
+`attempts=1` → passed grading first try. `attempts=3` → all retries exhausted, returned "I don't know".
 
 ### `GET /health`
-
-Health check endpoint.
-
-**Response:**
 ```json
-{
-  "status": "ok"
-}
+{ "status": "ok" }
 ```
 
----
+## How Hybrid Retrieval Works
+
+Pure vector search misses exact keyword matches (model names, technical terms). BM25 misses semantic matches. Combining both then reranking with a cross-encoder gives significantly better chunk quality before the LLM ever sees the context.
+
+```
+Query → Vector Search (top-10) + BM25 (top-10)
+      → Merge + deduplicate (~20 candidates)
+      → Cross-encoder reranker scores all candidates
+      → Return top-4 by reranker score
+      → Relevance gate: if top score < -5.0, return empty (fast rejection)
+```
+
+## How Semantic Chunking Works
+
+Documents are split by meaning, not by fixed character counts. The `SemanticChunker` embeds each sentence, measures similarity between adjacent sentences, and splits where similarity drops — keeping related ideas together in the same chunk.
+
+Fixed chunking splits mid-thought. Semantic chunking preserves context. Better chunks → better retrieval → fewer retries.
+
+## Security
+
+Three-layer prompt injection defense:
+1. **Pattern matching** — 20+ regex patterns block known injection attempts before the LLM runs
+2. **Hardened system prompt** — explicit instructions to ignore embedded instructions
+3. **Reranker score gate** — off-topic/adversarial queries score below threshold and are rejected without LLM calls
+
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GROQ_API_KEY` | required | Groq API key |
+| `CHROMA_PERSIST_DIR` | `./chroma_db` | Vector store path |
+| `TRANSFORMERS_OFFLINE` | `1` | Skip HuggingFace Hub checks |
+| `HF_HUB_OFFLINE` | `1` | Run embeddings fully offline |
+
+## Known Limitations
+
+- Single worker processes one request at a time (~500MB RAM per additional worker)
+- Groq free tier: 30 requests/min (3 retries × 10 users = rate limit risk)
+- Pattern-based injection detection can be bypassed by novel phrasing — a dedicated classifier would be more robust
+- No conversation history — each query is stateless
 
 ## License
 
 MIT
-
----
-
-## Acknowledgments
-
-Built with:
-- [LangChain](https://github.com/langchain-ai/langchain) for RAG primitives
-- [LangGraph](https://github.com/langchain-ai/langgraph) for state machine orchestration
-- [ChromaDB](https://github.com/chroma-core/chroma) for vector storage
-- [FastAPI](https://github.com/tiangolo/fastapi) for the API layer
-- [Groq](https://groq.com) for fast LLM inference
