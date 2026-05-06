@@ -1,0 +1,29 @@
+version: "3.9"
+
+# WHY docker-compose?
+# Running 'docker run' with all the flags is painful.
+# docker-compose.yml is a config file that captures everything:
+# volumes, env vars, ports, restart policy — run with one command.
+
+services:
+  rag-api:
+    build: .
+    container_name: self-healing-rag
+    ports:
+      - "8000:8000"       # host:container — access at localhost:8000
+    env_file:
+      - .env              # loads GROQ_API_KEY and CHROMA_PERSIST_DIR
+    volumes:
+      # Mount chroma_db from host into container
+      # WHY? So your vector store persists across container restarts.
+      # Without this, every container restart loses all ingested data.
+      - ./chroma_db:/app/chroma_db
+      # Mount docs so you can add new files without rebuilding the image
+      - ./docs:/app/docs
+    restart: unless-stopped   # auto-restart on crash, stop on manual 'docker stop'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s   # give the app 60s to start before health checks begin
